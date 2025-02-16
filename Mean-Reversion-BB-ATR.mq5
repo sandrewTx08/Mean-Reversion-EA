@@ -4,13 +4,13 @@
 
 //--- Input Parameters
 input double Initial_Lot = 0.01;
-input double ATR_Threshold = 0.00070; // 7 pips
-input int BB_Period = 20;
+input double ATR_Threshold = 0.001; // 7 pips
+input int BB_Period = 30;
 input double BB_Deviation = 2.0;
-input int ATR_Period = 14;
-input double TP_Points = 60;    // 100 pips take profit
-input double Recovery_TP = 100; // 50 pips for recovery trades
-input int Recovery_Step = 50;   // 100 pips between recoveries
+input int ATR_Period = 24;
+input double TP_Points = 61;    // 60 pips take profit
+input double Recovery_TP = 144; // 100 pips for recovery trades
+input int Recovery_Step = 89;   // 50 pips between recoveries
 
 //--- Global Variables
 int bbHandle, atrHandle;
@@ -41,7 +41,10 @@ int OnInit()
 void OnTick()
 {
    if (!NewBar())
+   {
+      CheckVirtualTP(); // Check virtual TP even between candles
       return;
+   }
 
    UpdateIndicators();
 
@@ -52,7 +55,7 @@ void OnTick()
    }
 
    CheckForRecoveries();
-   MonitorRecoveryClosures();
+   CheckVirtualTP(); // Check virtual TP on new bar
 }
 
 //+------------------------------------------------------------------+
@@ -96,13 +99,13 @@ void PlaceInitialOrders()
 {
    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    buyEntryPrice = price;
-   trade.Buy(Initial_Lot, _Symbol, price, 0, price + TP_Points * _Point, "Initial Buy");
+   trade.Buy(Initial_Lot, _Symbol, price, 0, 0, "Initial Buy");
    ArrayResize(buyTickets, ArraySize(buyTickets) + 1);
    buyTickets[ArraySize(buyTickets) - 1] = trade.ResultOrder();
 
    price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    sellEntryPrice = price;
-   trade.Sell(Initial_Lot, _Symbol, price, 0, price - TP_Points * _Point, "Initial Sell");
+   trade.Sell(Initial_Lot, _Symbol, price, 0, 0, "Initial Sell");
    ArrayResize(sellTickets, ArraySize(sellTickets) + 1);
    sellTickets[ArraySize(sellTickets) - 1] = trade.ResultOrder();
 }
@@ -171,15 +174,48 @@ void OpenRecoveryTrade(ENUM_ORDER_TYPE type, double price, int level)
       ArrayResize(sellTickets, ArraySize(sellTickets) + 1);
       sellTickets[ArraySize(sellTickets) - 1] = trade.ResultOrder();
    }
-   UpdateTpForDirection(type == ORDER_TYPE_BUY ? POSITION_TYPE_BUY : POSITION_TYPE_SELL);
 }
 
 //+------------------------------------------------------------------+
-//| Update take profit levels                                        |
+//| Check virtual take profit levels                                 |
 //+------------------------------------------------------------------+
-void UpdateTpForDirection(ENUM_POSITION_TYPE type)
+void CheckVirtualTP()
 {
-   double totalLots = 0;
+   // Check for buy positions
+   if (PositionsTotalByType(POSITION_TYPE_BUY) > 0)
+   {
+      double breakeven = CalculateBreakeven(POSITION_TYPE_BUY);
+      double tpPrice = breakeven + TP_Points * _Point;
+      double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+      if (currentBid >= tpPrice && breakeven > 0)
+      {
+         CloseAllPositions(POSITION_TYPE_BUY);
+         ArrayFree(buyTickets);
+      }
+   }
+
+   // Check for sell positions
+   if (PositionsTotalByType(POSITION_TYPE_SELL) > 0)
+   {
+      double breakeven = CalculateBreakeven(POSITION_TYPE_SELL);
+      double tpPrice = breakeven - TP_Points * _Point;
+      double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      if (currentAsk <= tpPrice && breakeven > 0)
+      {
+         CloseAllPositions(POSITION_TYPE_SELL);
+         ArrayFree(sellTickets);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate breakeven price for position type                      |
+//+------------------------------------------------------------------+
+double CalculateBreakeven(ENUM_POSITION_TYPE type)
+{
+   double totalVolume = 0;
    double weightedPrice = 0;
 
    for (int i = PositionsTotal() - 1; i >= 0; i--)
@@ -187,52 +223,32 @@ void UpdateTpForDirection(ENUM_POSITION_TYPE type)
       ulong ticket = PositionGetTicket(i);
       if (PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_TYPE) == type)
       {
-         double lots = PositionGetDouble(POSITION_VOLUME);
+         double volume = PositionGetDouble(POSITION_VOLUME);
          double entry = PositionGetDouble(POSITION_PRICE_OPEN);
-         totalLots += lots;
-         weightedPrice += entry * lots;
+         totalVolume += volume;
+         weightedPrice += entry * volume;
       }
    }
 
-   if (totalLots > 0)
-   {
-      double breakeven = weightedPrice / totalLots;
-      double tpPrice = type == POSITION_TYPE_BUY ? breakeven + Recovery_TP * _Point : breakeven - Recovery_TP * _Point;
+   if (totalVolume > 0)
+      return weightedPrice / totalVolume;
 
-      for (int i = PositionsTotal() - 1; i >= 0; i--)
-      {
-         ulong ticket = PositionGetTicket(i);
-         if (PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_TYPE) == type)
-         {
-            trade.PositionModify(ticket, PositionGetDouble(POSITION_SL), tpPrice);
-         }
-      }
-   }
+   return 0.0;
 }
 
 //+------------------------------------------------------------------+
-//| Monitor recovery closures                                        |
+//| Get number of positions by type                                  |
 //+------------------------------------------------------------------+
-void MonitorRecoveryClosures()
+int PositionsTotalByType(ENUM_POSITION_TYPE type)
 {
-   CheckRecoveryClosure(buyTickets, POSITION_TYPE_BUY);
-   CheckRecoveryClosure(sellTickets, POSITION_TYPE_SELL);
-}
-
-//+------------------------------------------------------------------+
-//| Check recovery closure                                           |
-//+------------------------------------------------------------------+
-void CheckRecoveryClosure(ulong &tickets[], ENUM_POSITION_TYPE type)
-{
-   for (int i = ArraySize(tickets) - 1; i >= 0; i--)
+   int count = 0;
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
-      if (!PositionSelectByTicket(tickets[i]))
-      {
-         CloseAllPositions(type);
-         ArrayFree(tickets);
-         break;
-      }
+      ulong ticket = PositionGetTicket(i);
+      if (PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_TYPE) == type)
+         count++;
    }
+   return count;
 }
 
 //+------------------------------------------------------------------+
