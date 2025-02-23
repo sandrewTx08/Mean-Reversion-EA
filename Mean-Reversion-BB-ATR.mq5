@@ -5,12 +5,13 @@ input double Initial_Lot = 0.01;
 input int BB_Period = 200;
 input double BB_Deviation = 2.0;
 input int ATR_Period = 50;
-input double TP_Points = 100;  // Take profit in points
-input int Recovery_Step = 100; // Step between recoveries in points
+input double TP_Points = 100;                    // Take profit in points
+input int Recovery_Step = 100;                   // Step between recoveries in points
+input double Recovery_Distance_Multiplier = 1.5; // Distance multiplier for recovery distance
 input int RSI_Period = 14;
 input int RSI_Overbought = 70;
 input int RSI_Oversold = 30;
-input double ATR_Decrease_Percent = 3.0; // Required ATR decrease percentage
+input double ATR_Decrease_Percent = 15.0; // Required ATR decrease percentage
 
 //--- Trading Hours
 input int StartHour = 0; // Trading start hour (server time)
@@ -153,7 +154,7 @@ void CheckBuyRecoveries()
       return;
 
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if ((lastBuyTradePrice - currentBid) / _Point >= Recovery_Step)
+   if ((lastBuyTradePrice - currentBid) / _Point >= Recovery_Step * RecoveryLevel * Recovery_Distance_Multiplier)
    {
       if (rsiBuffer[0] < RSI_Oversold && currentBid < lowerBand[0])
       {
@@ -173,7 +174,7 @@ void CheckSellRecoveries()
       return;
 
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   if ((currentAsk - lastSellTradePrice) / _Point >= Recovery_Step)
+   if ((currentAsk - lastSellTradePrice) / _Point >= Recovery_Step * RecoveryLevel * Recovery_Distance_Multiplier)
    {
       if (rsiBuffer[0] > RSI_Overbought && currentAsk > upperBand[0])
       {
