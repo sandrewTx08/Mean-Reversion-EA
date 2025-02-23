@@ -1,20 +1,29 @@
-#property copyright "Sander Silva"
-#property version "0.1"
 #include <Trade/Trade.mqh>
 
 //--- Input Parameters
 input double Initial_Lot = 0.01;
-input double ATR_Threshold = 0.001; // 7 pips
-input int BB_Period = 30;
+input int BB_Period = 200;
 input double BB_Deviation = 2.0;
-input int ATR_Period = 24;
-input double TP_Points = 61;    // 60 pips take profit
-input double Recovery_TP = 144; // 100 pips for recovery trades
-input int Recovery_Step = 89;   // 50 pips between recoveries
+input int ATR_Period = 50;
+input double TP_Points = 100;  // Take profit in points
+input int Recovery_Step = 100; // Step between recoveries in points
+input int RSI_Period = 14;
+input int RSI_Overbought = 70;
+input int RSI_Oversold = 30;
+input double ATR_Decrease_Percent = 3.0; // Required ATR decrease percentage
+
+//--- Trading Hours
+input int StartHour = 0; // Trading start hour (server time)
+input int StopHour = 24; // Trading end hour (server time)
 
 //--- Global Variables
-int bbHandle, atrHandle;
-double middleBand[], atrBuffer[], buyEntryPrice, sellEntryPrice;
+int bbHandle, atrHandle, rsiHandle;
+double upperBand[], middleBand[], lowerBand[], atrBuffer[], rsiBuffer[];
+double buyEntryPrice, sellEntryPrice;
+
+//--- Trade Tracking
+double lastBuyTradePrice, lastSellTradePrice;
+int RecoveryLevel = 0;
 ulong buyTickets[], sellTickets[];
 datetime lastTradeTime;
 CTrade trade;
@@ -24,13 +33,15 @@ CTrade trade;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Initialize indicator handles
    bbHandle = iBands(_Symbol, _Period, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
    atrHandle = iATR(_Symbol, _Period, ATR_Period);
+   rsiHandle = iRSI(_Symbol, _Period, RSI_Period, PRICE_CLOSE);
 
-   // Set array series
+   ArraySetAsSeries(upperBand, true);
    ArraySetAsSeries(middleBand, true);
+   ArraySetAsSeries(lowerBand, true);
    ArraySetAsSeries(atrBuffer, true);
+   ArraySetAsSeries(rsiBuffer, true);
 
    return (INIT_SUCCEEDED);
 }
@@ -42,20 +53,29 @@ void OnTick()
 {
    if (!NewBar())
    {
-      CheckVirtualTP(); // Check virtual TP even between candles
+      CheckVirtualTP();
       return;
    }
 
    UpdateIndicators();
 
-   if (CheckEntryConditions())
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int currentHour = dt.hour;
+
+   // Check initial trade conditions
+   if (PositionsTotal() == 0)
    {
-      PlaceInitialOrders();
-      lastTradeTime = (datetime)SeriesInfoInteger(_Symbol, _Period, SERIES_LASTBAR_DATE);
+      if ((currentHour >= StartHour && currentHour < StopHour) && CheckEntryConditions())
+      {
+         PlaceInitialOrders();
+         lastTradeTime = iTime(_Symbol, _Period, 0);
+      }
    }
 
+   // Check recovery conditions
    CheckForRecoveries();
-   CheckVirtualTP(); // Check virtual TP on new bar
+   CheckVirtualTP();
 }
 
 //+------------------------------------------------------------------+
@@ -63,10 +83,8 @@ void OnTick()
 //+------------------------------------------------------------------+
 bool NewBar()
 {
-   datetime current[];
-   if (CopyTime(_Symbol, _Period, 0, 1, current) != 1)
-      return false;
-   return current[0] != lastTradeTime;
+   datetime currentBar = iTime(_Symbol, _Period, 0);
+   return currentBar != lastTradeTime;
 }
 
 //+------------------------------------------------------------------+
@@ -74,22 +92,25 @@ bool NewBar()
 //+------------------------------------------------------------------+
 void UpdateIndicators()
 {
-   // Copy Bollinger Bands middle line
    CopyBuffer(bbHandle, 0, 0, 3, middleBand);
-
-   // Copy ATR values
+   CopyBuffer(bbHandle, 1, 0, 3, upperBand);
+   CopyBuffer(bbHandle, 2, 0, 3, lowerBand);
    CopyBuffer(atrHandle, 0, 0, 3, atrBuffer);
+   CopyBuffer(rsiHandle, 0, 0, 3, rsiBuffer);
 }
 
 //+------------------------------------------------------------------+
-//| Check entry conditions                                           |
+//| Check initial entry conditions                                   |
 //+------------------------------------------------------------------+
 bool CheckEntryConditions()
 {
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   return PositionsTotal() == 0 &&
-          atrBuffer[0] <= ATR_Threshold &&
-          MathAbs(currentPrice - middleBand[0]) < 0.00001;
+
+   // ATR decrease condition
+   bool atrCondition = (atrBuffer[1] != 0) &&
+                       ((atrBuffer[1] - atrBuffer[0]) / atrBuffer[1] >= (ATR_Decrease_Percent / 100.0));
+
+   return atrCondition;
 }
 
 //+------------------------------------------------------------------+
@@ -108,10 +129,14 @@ void PlaceInitialOrders()
    trade.Sell(Initial_Lot, _Symbol, price, 0, 0, "Initial Sell");
    ArrayResize(sellTickets, ArraySize(sellTickets) + 1);
    sellTickets[ArraySize(sellTickets) - 1] = trade.ResultOrder();
+
+   lastBuyTradePrice = buyEntryPrice;
+   lastSellTradePrice = sellEntryPrice;
+   lastTradeTime = iTime(_Symbol, _Period, 0);
 }
 
 //+------------------------------------------------------------------+
-//| Check for needed recoveries                                      |
+//| Check for recovery opportunities                                 |
 //+------------------------------------------------------------------+
 void CheckForRecoveries()
 {
@@ -124,16 +149,18 @@ void CheckForRecoveries()
 //+------------------------------------------------------------------+
 void CheckBuyRecoveries()
 {
-   if (ArraySize(buyTickets) == 0)
+   if (PositionsTotalByType(POSITION_TYPE_BUY) == 0)
       return;
 
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double priceDiff = (buyEntryPrice - currentPrice) / _Point;
-   int requiredLevels = (int)(priceDiff / Recovery_Step);
-
-   if (requiredLevels > ArraySize(buyTickets) - 1)
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if ((lastBuyTradePrice - currentBid) / _Point >= Recovery_Step)
    {
-      OpenRecoveryTrade(ORDER_TYPE_BUY, currentPrice, requiredLevels);
+      if (rsiBuffer[0] < RSI_Oversold && currentBid < lowerBand[0])
+      {
+         OpenRecoveryTrade(ORDER_TYPE_BUY, SymbolInfoDouble(_Symbol, SYMBOL_ASK), RecoveryLevel + 1);
+         RecoveryLevel++;
+         lastTradeTime = iTime(_Symbol, _Period, 0); // Update last trade time
+      }
    }
 }
 
@@ -142,16 +169,18 @@ void CheckBuyRecoveries()
 //+------------------------------------------------------------------+
 void CheckSellRecoveries()
 {
-   if (ArraySize(sellTickets) == 0)
+   if (PositionsTotalByType(POSITION_TYPE_SELL) == 0)
       return;
 
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double priceDiff = (currentPrice - sellEntryPrice) / _Point;
-   int requiredLevels = (int)(priceDiff / Recovery_Step);
-
-   if (requiredLevels > ArraySize(sellTickets) - 1)
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   if ((currentAsk - lastSellTradePrice) / _Point >= Recovery_Step)
    {
-      OpenRecoveryTrade(ORDER_TYPE_SELL, currentPrice, requiredLevels);
+      if (rsiBuffer[0] > RSI_Overbought && currentAsk > upperBand[0])
+      {
+         OpenRecoveryTrade(ORDER_TYPE_SELL, SymbolInfoDouble(_Symbol, SYMBOL_BID), RecoveryLevel + 1);
+         RecoveryLevel++;
+         lastTradeTime = iTime(_Symbol, _Period, 0); // Update last trade time
+      }
    }
 }
 
@@ -167,12 +196,14 @@ void OpenRecoveryTrade(ENUM_ORDER_TYPE type, double price, int level)
       trade.Buy(lotSize, _Symbol, price, 0, 0, "Recovery Buy Lvl" + string(level));
       ArrayResize(buyTickets, ArraySize(buyTickets) + 1);
       buyTickets[ArraySize(buyTickets) - 1] = trade.ResultOrder();
+      lastBuyTradePrice = price;
    }
    else
    {
       trade.Sell(lotSize, _Symbol, price, 0, 0, "Recovery Sell Lvl" + string(level));
       ArrayResize(sellTickets, ArraySize(sellTickets) + 1);
       sellTickets[ArraySize(sellTickets) - 1] = trade.ResultOrder();
+      lastSellTradePrice = price;
    }
 }
 
@@ -181,28 +212,24 @@ void OpenRecoveryTrade(ENUM_ORDER_TYPE type, double price, int level)
 //+------------------------------------------------------------------+
 void CheckVirtualTP()
 {
-   // Check for buy positions
+   // Buy positions TP check
    if (PositionsTotalByType(POSITION_TYPE_BUY) > 0)
    {
       double breakeven = CalculateBreakeven(POSITION_TYPE_BUY);
       double tpPrice = breakeven + TP_Points * _Point;
-      double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-      if (currentBid >= tpPrice && breakeven > 0)
+      if (SymbolInfoDouble(_Symbol, SYMBOL_BID) >= tpPrice && breakeven > 0)
       {
          CloseAllPositions(POSITION_TYPE_BUY);
          ArrayFree(buyTickets);
       }
    }
 
-   // Check for sell positions
+   // Sell positions TP check
    if (PositionsTotalByType(POSITION_TYPE_SELL) > 0)
    {
       double breakeven = CalculateBreakeven(POSITION_TYPE_SELL);
       double tpPrice = breakeven - TP_Points * _Point;
-      double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-      if (currentAsk <= tpPrice && breakeven > 0)
+      if (SymbolInfoDouble(_Symbol, SYMBOL_ASK) <= tpPrice && breakeven > 0)
       {
          CloseAllPositions(POSITION_TYPE_SELL);
          ArrayFree(sellTickets);
@@ -211,7 +238,7 @@ void CheckVirtualTP()
 }
 
 //+------------------------------------------------------------------+
-//| Calculate breakeven price for position type                      |
+//| Calculate breakeven price                                        |
 //+------------------------------------------------------------------+
 double CalculateBreakeven(ENUM_POSITION_TYPE type)
 {
@@ -229,15 +256,11 @@ double CalculateBreakeven(ENUM_POSITION_TYPE type)
          weightedPrice += entry * volume;
       }
    }
-
-   if (totalVolume > 0)
-      return weightedPrice / totalVolume;
-
-   return 0.0;
+   return (totalVolume > 0) ? weightedPrice / totalVolume : 0.0;
 }
 
 //+------------------------------------------------------------------+
-//| Get number of positions by type                                  |
+//| Get positions count by type                                      |
 //+------------------------------------------------------------------+
 int PositionsTotalByType(ENUM_POSITION_TYPE type)
 {
@@ -262,7 +285,7 @@ void CloseAllPositions(ENUM_POSITION_TYPE type)
       if (PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_TYPE) == type)
       {
          trade.PositionClose(ticket);
+         RecoveryLevel = 0;
       }
    }
 }
-//+------------------------------------------------------------------+
