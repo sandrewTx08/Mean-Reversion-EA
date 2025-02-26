@@ -234,7 +234,9 @@ void CheckForRecoveries()
 {
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double currentATR = atrBuffer[0];
-   double requiredDistance = currentATR * Recovery_Distance_Multiplier_Loss * (RecoveryLevel + 1);
+
+   // Use Recovery_Distance_Multiplier to determine distance for new recovery trades
+   double requiredDistance = currentATR * Recovery_Distance_Multiplier * (RecoveryLevel + 1);
 
    if ((lastBuyTradePrice - currentPrice) >= requiredDistance)
    {
