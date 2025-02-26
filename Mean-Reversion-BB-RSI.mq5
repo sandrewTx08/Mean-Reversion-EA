@@ -10,12 +10,14 @@ input double Recovery_Distance_Multiplier = 1.5; // Multiplier for recovery dist
 input int RSI_Period = 14;
 input int RSI_Overbought = 90;
 input int RSI_Oversold = 20;
-input int Trailing_Start = 15; // Trailing stop activation (points)
-input int Trailing_Step = 100; // Trailing stop step (points)
-input double TP_Points = 300;  // Take profit in points
+input int Trailing_Start = 15;                   // Trailing stop activation (points)
+input int Trailing_Step = 100;                   // Trailing stop step (points)
+input double TP_Points = 300;                    // Take profit in points
+input double Max_Equity_Drawdown_Money = 2000.0; // Maximum equity risk in money
 
 //--- Global Variables
-int bbHandle, rsiHandle;
+int bbHandle,
+    rsiHandle;
 double upperBand[], middleBand[], lowerBand[], rsiBuffer[];
 double buyEntryPrice, sellEntryPrice;
 double buyExtremePrice = 0.0;  // Tracks highest bid for buys
@@ -46,6 +48,14 @@ int OnInit()
 
 void OnTick()
 {
+   if (AccountInfoDouble(ACCOUNT_EQUITY) <= Max_Equity_Drawdown_Money)
+   {
+      CloseAllPositions(POSITION_TYPE_BUY);
+      CloseAllPositions(POSITION_TYPE_SELL);
+      ExpertRemove();
+      return;
+   }
+
    ManageVirtualStops();
 
    CheckProfitCoverage(); // New profit coverage check
