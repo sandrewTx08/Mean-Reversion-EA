@@ -2,23 +2,25 @@
 
 //--- Input Parameters
 input double Initial_Lot = 0.01;
-input int BB_Period = 500;
+input int BB_Period = 200;
 input double BB_Deviation = 2.0;
 input int Recovery_Start = 100;                  // Initial recovery distance in points
 input int Recovery_Step = 100;                   // Additional recovery distance in points for each level
 input double Recovery_Distance_Multiplier = 1.5; // Multiplier for recovery distance at each level
 input int RSI_Period = 14;
-input int RSI_Overbought = 90;
-input int RSI_Oversold = 20;
-input int Trailing_Start = 15;                   // Trailing stop activation (points)
-input int Trailing_Step = 100;                   // Trailing stop step (points)
-input double TP_Points = 300;                    // Take profit in points
-input double Max_Equity_Drawdown_Money = 2000.0; // Maximum equity risk in money
+input int RSI_Overbought = 92;
+input int RSI_Oversold = 18;
+input int Trailing_Start = 110;                       // Trailing stop activation (points)
+input int Trailing_Step = 100;                        // Trailing stop step (points)
+input double Max_Equity_Drawdown_Money = 2000.0;      // Maximum equity risk in money
+input int ATR_Period = 14;                            // ATR Period
+input double ATR_Multiplier_Gain = 2.0;               // ATR Multiplier for Gain
+input double Recovery_Distance_Multiplier_Loss = 2.0; // Multiplier for recovery distance at loss
 
 //--- Global Variables
 int bbHandle,
-    rsiHandle;
-double upperBand[], middleBand[], lowerBand[], rsiBuffer[];
+    rsiHandle, atrHandle;
+double atrBuffer[], upperBand[], middleBand[], lowerBand[], rsiBuffer[];
 double buyEntryPrice, sellEntryPrice;
 double buyExtremePrice = 0.0;  // Tracks highest bid for buys
 double sellExtremePrice = 0.0; // Tracks lowest ask for sells
@@ -35,9 +37,11 @@ CTrade trade;
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   atrHandle = iATR(_Symbol, _Period, ATR_Period);
    bbHandle = iBands(_Symbol, _Period, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
    rsiHandle = iRSI(_Symbol, _Period, RSI_Period, PRICE_CLOSE);
 
+   ArraySetAsSeries(atrBuffer, true);
    ArraySetAsSeries(upperBand, true);
    ArraySetAsSeries(middleBand, true);
    ArraySetAsSeries(lowerBand, true);
@@ -48,6 +52,8 @@ int OnInit()
 
 void OnTick()
 {
+   UpdateIndicators();
+
    if (AccountInfoDouble(ACCOUNT_EQUITY) <= Max_Equity_Drawdown_Money)
    {
       CloseAllPositions(POSITION_TYPE_BUY);
@@ -73,8 +79,6 @@ void OnTick()
 
    if (isNewBar)
    {
-      UpdateIndicators();
-
       if (PositionsTotal() == 0 && CheckEntryConditions())
       {
          PlaceInitialOrders();
@@ -123,60 +127,47 @@ void CheckProfitCoverage()
    }
 }
 
-//+------------------------------------------------------------------+
-//| Coordinated trailing stop management                             |
-//+------------------------------------------------------------------+
 void ManageVirtualStops()
 {
-   // Calculate dynamic trailing parameters based on recovery level
-   double dynamicTrailingStart = Trailing_Start * (RecoveryLevel + 1);
-   double dynamicTrailingStep = Trailing_Step * (RecoveryLevel + 1);
+   if (ArraySize(atrBuffer) == 0)
+   {
+      UpdateIndicators();
+      return;
+   }
 
-   // Process buy positions
+   double currentATR = atrBuffer[0];
+
    if (PositionsTotalByType(POSITION_TYPE_BUY) > 0)
    {
       double breakeven = CalculateBreakeven(POSITION_TYPE_BUY);
       double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-      // Update extreme price
       buyExtremePrice = (buyExtremePrice == 0.0) ? currentBid : fmax(currentBid, buyExtremePrice);
 
-      // Take profit check
-      if (currentBid >= breakeven + TP_Points * _Point)
-      {
-         CloseAllPositions(POSITION_TYPE_BUY);
-         return;
-      }
+      // ATR multiplied breakeven and steps for gains
+      double atrBreakeven = breakeven + (currentATR * ATR_Multiplier_Gain);
+      double atrTrailingStep = currentATR * Recovery_Distance_Multiplier;
 
-      // Dynamic trailing stop
-      if ((currentBid - breakeven) / _Point >= dynamicTrailingStart)
+      if (currentBid >= atrBreakeven)
       {
-         double virtualSL = buyExtremePrice - dynamicTrailingStep * _Point;
+         double virtualSL = buyExtremePrice - atrTrailingStep;
          if (currentBid <= virtualSL)
             CloseAllPositions(POSITION_TYPE_BUY);
       }
    }
 
-   // Process sell positions
    if (PositionsTotalByType(POSITION_TYPE_SELL) > 0)
    {
       double breakeven = CalculateBreakeven(POSITION_TYPE_SELL);
       double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-      // Update extreme price
       sellExtremePrice = (sellExtremePrice == 0.0) ? currentAsk : fmin(currentAsk, sellExtremePrice);
 
-      // Take profit check
-      if (currentAsk <= breakeven - TP_Points * _Point)
-      {
-         CloseAllPositions(POSITION_TYPE_SELL);
-         return;
-      }
+      // ATR multiplied breakeven and steps for losses
+      double atrBreakeven = breakeven - (currentATR * ATR_Multiplier_Gain);
+      double atrTrailingStep = currentATR * Recovery_Distance_Multiplier_Loss;
 
-      // Dynamic trailing stop
-      if ((breakeven - currentAsk) / _Point >= dynamicTrailingStart)
+      if (currentAsk <= atrBreakeven)
       {
-         double virtualSL = sellExtremePrice + dynamicTrailingStep * _Point;
+         double virtualSL = sellExtremePrice + atrTrailingStep;
          if (currentAsk >= virtualSL)
             CloseAllPositions(POSITION_TYPE_SELL);
       }
@@ -192,15 +183,19 @@ bool NewBar()
    return currentBar != lastTradeTime;
 }
 
-//+------------------------------------------------------------------+
-//| Update indicator buffers                                         |
-//+------------------------------------------------------------------+
 void UpdateIndicators()
 {
+   ArrayResize(middleBand, 3);
+   ArrayResize(upperBand, 3);
+   ArrayResize(lowerBand, 3);
+   ArrayResize(rsiBuffer, 3);
+   ArrayResize(atrBuffer, 3);
+
    CopyBuffer(bbHandle, 0, 0, 3, middleBand);
    CopyBuffer(bbHandle, 1, 0, 3, upperBand);
    CopyBuffer(bbHandle, 2, 0, 3, lowerBand);
    CopyBuffer(rsiHandle, 0, 0, 3, rsiBuffer);
+   CopyBuffer(atrHandle, 0, 0, 3, atrBuffer);
 }
 
 //+------------------------------------------------------------------+
@@ -238,22 +233,23 @@ bool CheckEntryConditions()
 void CheckForRecoveries()
 {
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double requiredDistance = (Recovery_Start + Recovery_Step * RecoveryLevel) * _Point;
+   double currentATR = atrBuffer[0];
+   double requiredDistance = currentATR * Recovery_Distance_Multiplier_Loss * (RecoveryLevel + 1);
 
-   // Buy recovery when price moves down required distance
    if ((lastBuyTradePrice - currentPrice) >= requiredDistance)
    {
       OpenHedgeTrade(ORDER_TYPE_BUY, SymbolInfoDouble(_Symbol, SYMBOL_ASK));
       RecoveryLevel++;
    }
 
-   // Sell recovery when price moves up required distance
    if ((currentPrice - lastSellTradePrice) >= requiredDistance)
    {
       OpenHedgeTrade(ORDER_TYPE_SELL, SymbolInfoDouble(_Symbol, SYMBOL_BID));
       RecoveryLevel++;
    }
-} //+------------------------------------------------------------------+
+}
+
+//+------------------------------------------------------------------+
 //| Check buy side recoveries                                        |
 //+------------------------------------------------------------------+
 void CheckBuyRecoveries()
