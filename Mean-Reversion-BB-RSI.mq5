@@ -1,104 +1,90 @@
 #include <Trade/Trade.mqh>
 
-//--- Input Parameters
-input double Initial_Lot = 0.01;
-input int BB_Period = 200;
-input double BB_Deviation = 2.0;
-input int Recovery_Start = 100;                  // Initial recovery distance in points
-input int Recovery_Step = 100;                   // Additional recovery distance in points for each level
-input double Recovery_Distance_Multiplier = 1.5; // Multiplier for recovery distance at each level
-input int RSI_Period = 14;
-input int RSI_Overbought = 92;
-input int RSI_Oversold = 18;
-input int Trailing_Start = 110;                       // Trailing stop activation (points)
-input int Trailing_Step = 100;                        // Trailing stop step (points)
-input double Max_Equity_Drawdown_Money = 2000.0;      // Maximum equity risk in money
-input int ATR_Period = 14;                            // ATR Period
-input double ATR_Multiplier_Gain = 2.0;               // ATR Multiplier for Gain
-input double Recovery_Distance_Multiplier_Loss = 2.0; // Multiplier for recovery distance at loss
+input double initialLot = 0.01;
+input int bbPeriod = 200;
+input double bbDeviation = 2.0;
+input int recoveryStart = 100;
+input int recoveryStep = 100;
+input double recoveryDistanceMultiplier = 1.5;
+input int rsiPeriod = 14;
+input int rsiOverbought = 92;
+input int rsiOversold = 18;
+input int trailingStart = 110;
+input int trailingStep = 100;
+input double maxEquityDrawdownMoney = 2000.0;
+input int atrPeriod = 14;
+input double atrMultiplierGain = 2.0;
+input double recoveryDistanceMultiplierLoss = 2.0;
 
-//--- Global Variables
-int bbHandle,
-    rsiHandle, atrHandle;
-double atrBuffer[], upperBand[], middleBand[], lowerBand[], rsiBuffer[];
-double buyEntryPrice, sellEntryPrice;
-double buyExtremePrice = 0.0;  // Tracks highest bid for buys
-double sellExtremePrice = 0.0; // Tracks lowest ask for sells
+int bandHandle, rsiHandle, atrIndicatorHandle;
+double atrData[], upperBB[], middleBB[], lowerBB[], rsiData[];
+double buyEntry = 0.0, sellEntry = 0.0;
+double maxBuyBid = 0.0, minSellPrice = 0.0;
 
-//--- Trade Tracking
-double lastBuyTradePrice, lastSellTradePrice;
-int RecoveryLevel = 0; // Unified recovery level counter
-ulong buyTickets[], sellTickets[];
-datetime lastTradeTime;
+double lastBuyPrice = 0.0, lastSellPrice = 0.0;
+int recoveryLevel = 0;
+ulong buyOrderTickets[], sellOrderTickets[];
+datetime lastBarTime = 0;
 CTrade trade;
 
-//+------------------------------------------------------------------+
-//| Expert initialization function                                   |
-//+------------------------------------------------------------------+
 int OnInit()
 {
-   atrHandle = iATR(_Symbol, _Period, ATR_Period);
-   bbHandle = iBands(_Symbol, _Period, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
-   rsiHandle = iRSI(_Symbol, _Period, RSI_Period, PRICE_CLOSE);
+   atrIndicatorHandle = iATR(_Symbol, _Period, atrPeriod);
+   bandHandle = iBands(_Symbol, _Period, bbPeriod, 0, bbDeviation, PRICE_CLOSE);
+   rsiHandle = iRSI(_Symbol, _Period, rsiPeriod, PRICE_CLOSE);
 
-   ArraySetAsSeries(atrBuffer, true);
-   ArraySetAsSeries(upperBand, true);
-   ArraySetAsSeries(middleBand, true);
-   ArraySetAsSeries(lowerBand, true);
-   ArraySetAsSeries(rsiBuffer, true);
+   ArraySetAsSeries(atrData, true);
+   ArraySetAsSeries(upperBB, true);
+   ArraySetAsSeries(middleBB, true);
+   ArraySetAsSeries(lowerBB, true);
+   ArraySetAsSeries(rsiData, true);
 
-   return (INIT_SUCCEEDED);
+   return INIT_SUCCEEDED;
 }
 
 void OnTick()
 {
-   UpdateIndicators();
-
-   if (AccountInfoDouble(ACCOUNT_EQUITY) <= Max_Equity_Drawdown_Money)
+   if ((AccountInfoDouble(ACCOUNT_BALANCE) - AccountInfoDouble(ACCOUNT_EQUITY)) >= maxEquityDrawdownMoney)
    {
-      CloseAllPositions(POSITION_TYPE_BUY);
-      CloseAllPositions(POSITION_TYPE_SELL);
+      closeAllPositions(POSITION_TYPE_BUY);
+      closeAllPositions(POSITION_TYPE_SELL);
       ExpertRemove();
       return;
    }
 
-   ManageVirtualStops();
-
-   CheckProfitCoverage(); // New profit coverage check
+   updateIndicators();
+   manageVirtualStops();
+   checkProfitCoverage();
 
    if (PositionsTotal() == 0)
    {
-      RecoveryLevel = 0;
-      buyExtremePrice = 0.0;
-      sellExtremePrice = 0.0;
-      ArrayFree(buyTickets);
-      ArrayFree(sellTickets);
+      recoveryLevel = 0;
+      maxBuyBid = 0.0;
+      minSellPrice = 0.0;
+      ArrayFree(buyOrderTickets);
+      ArrayFree(sellOrderTickets);
    }
 
-   bool isNewBar = NewBar();
-
-   if (isNewBar)
+   bool newBar = isNewBar();
+   if (newBar)
    {
-      if (PositionsTotal() == 0 && CheckEntryConditions())
+      if (PositionsTotal() == 0 && checkEntryConditions())
       {
-         PlaceInitialOrders();
-         lastTradeTime = iTime(_Symbol, _Period, 0);
+         placeInitialOrders();
+         lastBarTime = iTime(_Symbol, _Period, 0);
       }
    }
-
-   CheckForRecoveries();
+   checkForRecoveries();
 }
 
-void CheckProfitCoverage()
+void checkProfitCoverage()
 {
-   int buyPositions = PositionsTotalByType(POSITION_TYPE_BUY);
-   int sellPositions = PositionsTotalByType(POSITION_TYPE_SELL);
-
+   int buyPositions = positionsTotalByType(POSITION_TYPE_BUY);
+   int sellPositions = positionsTotalByType(POSITION_TYPE_SELL);
    if (buyPositions == 0 || sellPositions == 0)
       return;
 
    double buyProfit = 0.0, sellProfit = 0.0;
-
    for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
@@ -112,236 +98,182 @@ void CheckProfitCoverage()
             sellProfit += profit;
       }
    }
-
-   // Check if sell profits cover buy losses
    if (sellProfit > 0 && buyProfit < 0 && sellProfit >= (-buyProfit))
    {
-      CloseAllPositions(POSITION_TYPE_BUY);
-      CloseAllPositions(POSITION_TYPE_SELL);
+      closeAllPositions(POSITION_TYPE_BUY);
+      closeAllPositions(POSITION_TYPE_SELL);
    }
-   // Check if buy profits cover sell losses
    else if (buyProfit > 0 && sellProfit < 0 && buyProfit >= (-sellProfit))
    {
-      CloseAllPositions(POSITION_TYPE_BUY);
-      CloseAllPositions(POSITION_TYPE_SELL);
+      closeAllPositions(POSITION_TYPE_BUY);
+      closeAllPositions(POSITION_TYPE_SELL);
    }
 }
 
-void ManageVirtualStops()
+void manageVirtualStops()
 {
-   if (ArraySize(atrBuffer) == 0)
+   if (ArraySize(atrData) == 0)
    {
-      UpdateIndicators();
+      updateIndicators();
       return;
    }
-
-   double currentATR = atrBuffer[0];
-
-   if (PositionsTotalByType(POSITION_TYPE_BUY) > 0)
+   double currentATR = atrData[0];
+   if (positionsTotalByType(POSITION_TYPE_BUY) > 0)
    {
-      double breakeven = CalculateBreakeven(POSITION_TYPE_BUY);
+      double breakeven = calcBreakeven(POSITION_TYPE_BUY);
       double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      buyExtremePrice = (buyExtremePrice == 0.0) ? currentBid : fmax(currentBid, buyExtremePrice);
-
-      // ATR multiplied breakeven and steps for gains
-      double atrBreakeven = breakeven + (currentATR * ATR_Multiplier_Gain);
-      double atrTrailingStep = currentATR * Recovery_Distance_Multiplier;
-
+      maxBuyBid = (maxBuyBid == 0.0) ? currentBid : fmax(currentBid, maxBuyBid);
+      double atrBreakeven = breakeven + (currentATR * atrMultiplierGain);
+      double atrTrailingStep = currentATR * recoveryDistanceMultiplier;
       if (currentBid >= atrBreakeven)
       {
-         double virtualSL = buyExtremePrice - atrTrailingStep;
+         double virtualSL = maxBuyBid - atrTrailingStep;
          if (currentBid <= virtualSL)
-            CloseAllPositions(POSITION_TYPE_BUY);
+            closeAllPositions(POSITION_TYPE_BUY);
       }
    }
-
-   if (PositionsTotalByType(POSITION_TYPE_SELL) > 0)
+   if (positionsTotalByType(POSITION_TYPE_SELL) > 0)
    {
-      double breakeven = CalculateBreakeven(POSITION_TYPE_SELL);
+      double breakeven = calcBreakeven(POSITION_TYPE_SELL);
       double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      sellExtremePrice = (sellExtremePrice == 0.0) ? currentAsk : fmin(currentAsk, sellExtremePrice);
-
-      // ATR multiplied breakeven and steps for losses
-      double atrBreakeven = breakeven - (currentATR * ATR_Multiplier_Gain);
-      double atrTrailingStep = currentATR * Recovery_Distance_Multiplier_Loss;
-
+      minSellPrice = (minSellPrice == 0.0) ? currentAsk : fmin(currentAsk, minSellPrice);
+      double atrBreakeven = breakeven - (currentATR * atrMultiplierGain);
+      double atrTrailingStep = currentATR * recoveryDistanceMultiplierLoss;
       if (currentAsk <= atrBreakeven)
       {
-         double virtualSL = sellExtremePrice + atrTrailingStep;
+         double virtualSL = minSellPrice + atrTrailingStep;
          if (currentAsk >= virtualSL)
-            CloseAllPositions(POSITION_TYPE_SELL);
+            closeAllPositions(POSITION_TYPE_SELL);
       }
    }
 }
 
-//+------------------------------------------------------------------+
-//| Check for new candle                                             |
-//+------------------------------------------------------------------+
-bool NewBar()
+bool isNewBar()
 {
    datetime currentBar = iTime(_Symbol, _Period, 0);
-   return currentBar != lastTradeTime;
+   return (currentBar != lastBarTime);
 }
 
-void UpdateIndicators()
+void updateIndicators()
 {
-   ArrayResize(middleBand, 3);
-   ArrayResize(upperBand, 3);
-   ArrayResize(lowerBand, 3);
-   ArrayResize(rsiBuffer, 3);
-   ArrayResize(atrBuffer, 3);
-
-   CopyBuffer(bbHandle, 0, 0, 3, middleBand);
-   CopyBuffer(bbHandle, 1, 0, 3, upperBand);
-   CopyBuffer(bbHandle, 2, 0, 3, lowerBand);
-   CopyBuffer(rsiHandle, 0, 0, 3, rsiBuffer);
-   CopyBuffer(atrHandle, 0, 0, 3, atrBuffer);
+   ArrayResize(middleBB, 3);
+   ArrayResize(upperBB, 3);
+   ArrayResize(lowerBB, 3);
+   ArrayResize(rsiData, 3);
+   ArrayResize(atrData, 3);
+   CopyBuffer(bandHandle, 0, 0, 3, middleBB);
+   CopyBuffer(bandHandle, 1, 0, 3, upperBB);
+   CopyBuffer(bandHandle, 2, 0, 3, lowerBB);
+   CopyBuffer(rsiHandle, 0, 0, 3, rsiData);
+   CopyBuffer(atrIndicatorHandle, 0, 0, 3, atrData);
 }
 
-//+------------------------------------------------------------------+
-//| Place initial straddle orders                                    |
-//+------------------------------------------------------------------+
-void PlaceInitialOrders()
+void placeInitialOrders()
 {
    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   buyEntryPrice = price;
-   trade.Buy(Initial_Lot, _Symbol, price, 0, 0, "Initial Buy");
-   ArrayResize(buyTickets, ArraySize(buyTickets) + 1);
-   buyTickets[ArraySize(buyTickets) - 1] = trade.ResultOrder();
+   buyEntry = price;
+   trade.Buy(initialLot, _Symbol, price, 0, 0, "Initial Buy");
+   ArrayResize(buyOrderTickets, ArraySize(buyOrderTickets) + 1);
+   buyOrderTickets[ArraySize(buyOrderTickets) - 1] = trade.ResultOrder();
 
    price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   sellEntryPrice = price;
-   trade.Sell(Initial_Lot, _Symbol, price, 0, 0, "Initial Sell");
-   ArrayResize(sellTickets, ArraySize(sellTickets) + 1);
-   sellTickets[ArraySize(sellTickets) - 1] = trade.ResultOrder();
+   sellEntry = price;
+   trade.Sell(initialLot, _Symbol, price, 0, 0, "Initial Sell");
+   ArrayResize(sellOrderTickets, ArraySize(sellOrderTickets) + 1);
+   sellOrderTickets[ArraySize(sellOrderTickets) - 1] = trade.ResultOrder();
 
-   lastBuyTradePrice = buyEntryPrice;
-   lastSellTradePrice = sellEntryPrice;
-   lastTradeTime = iTime(_Symbol, _Period, 0);
+   lastBuyPrice = buyEntry;
+   lastSellPrice = sellEntry;
+   lastBarTime = iTime(_Symbol, _Period, 0);
 }
 
-//+------------------------------------------------------------------+
-//| Unified recovery system with distance coordination               |
-//+------------------------------------------------------------------+
-bool CheckEntryConditions()
+bool checkEntryConditions()
 {
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   // Check if price is near middle band for initial entry
-   return MathAbs(price - middleBand[0]) <= 2 * _Point;
+   bool priceNearMiddle = MathAbs(price - middleBB[0]) <= 2 * _Point;
+   return priceNearMiddle;
 }
 
-void CheckForRecoveries()
+void checkForRecoveries()
 {
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double currentATR = atrBuffer[0];
-
-   // Use Recovery_Distance_Multiplier to determine distance for new recovery trades
-   double requiredDistance = currentATR * Recovery_Distance_Multiplier * (RecoveryLevel + 1);
-
-   if ((lastBuyTradePrice - currentPrice) >= requiredDistance)
-   {
-      OpenHedgeTrade(ORDER_TYPE_BUY, SymbolInfoDouble(_Symbol, SYMBOL_ASK));
-      RecoveryLevel++;
-   }
-
-   if ((currentPrice - lastSellTradePrice) >= requiredDistance)
-   {
-      OpenHedgeTrade(ORDER_TYPE_SELL, SymbolInfoDouble(_Symbol, SYMBOL_BID));
-      RecoveryLevel++;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check buy side recoveries                                        |
-//+------------------------------------------------------------------+
-void CheckBuyRecoveries()
-{
-   if (PositionsTotalByType(POSITION_TYPE_BUY) == 0)
-      return;
-
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   // Calculate the effective recovery distance for the current recovery level.
-   // The trailing offset is added to both the initial and subsequent step distances.
-   double requiredDistance = CalculateRecoveryDistance(RecoveryLevel);
-
-   if ((lastBuyTradePrice - currentBid) >= requiredDistance)
-   {
-      if (rsiBuffer[0] < RSI_Oversold && currentBid < lowerBand[0])
-      {
-         // Open hedge recovery trade with the unified recovery level
-         OpenRecoveryTrade(ORDER_TYPE_SELL, SymbolInfoDouble(_Symbol, SYMBOL_BID), RecoveryLevel + 1);
-         RecoveryLevel++;
-         lastTradeTime = iTime(_Symbol, _Period, 0);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check sell side recoveries                                       |
-//+------------------------------------------------------------------+
-void CheckSellRecoveries()
-{
-   if (PositionsTotalByType(POSITION_TYPE_SELL) == 0)
-      return;
-
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double requiredDistance = CalculateRecoveryDistance(RecoveryLevel);
-
-   if ((currentAsk - lastSellTradePrice) >= requiredDistance)
+   double currentATR = atrData[0];
+   double requiredDistance = currentATR * recoveryDistanceMultiplier * (recoveryLevel + 1);
+   if ((lastBuyPrice - currentBid) >= requiredDistance)
    {
-      if (rsiBuffer[0] > RSI_Overbought && currentAsk > upperBand[0])
+      openHedgeTrade(ORDER_TYPE_BUY, currentAsk);
+      recoveryLevel++;
+   }
+   if ((currentBid - lastSellPrice) >= requiredDistance)
+   {
+      openHedgeTrade(ORDER_TYPE_SELL, currentBid);
+      recoveryLevel++;
+   }
+}
+
+void checkBuyRecoveries()
+{
+   if (positionsTotalByType(POSITION_TYPE_BUY) == 0)
+      return;
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double requiredDistance = calcRecoveryDistance(recoveryLevel);
+   if ((lastBuyPrice - currentBid) >= requiredDistance)
+   {
+      if (rsiData[0] < rsiOversold && currentBid < lowerBB[0])
       {
-         OpenRecoveryTrade(ORDER_TYPE_BUY, SymbolInfoDouble(_Symbol, SYMBOL_ASK), RecoveryLevel + 1);
-         RecoveryLevel++;
-         lastTradeTime = iTime(_Symbol, _Period, 0);
+         openRecoveryTrade(ORDER_TYPE_SELL, currentBid, recoveryLevel + 1);
+         recoveryLevel++;
+         lastBarTime = iTime(_Symbol, _Period, 0);
       }
    }
 }
 
-//+------------------------------------------------------------------+
-//| Calculate recovery distance based on level                       |
-//| This function adds the same trailing offset (Trailing_Step) to both |
-//| the initial recovery distance (Recovery_Start) and the subsequent   |
-//| step distances to keep the hedge gap constant.                     |
-//+------------------------------------------------------------------+
-double CalculateRecoveryDistance(int level)
+void checkSellRecoveries()
 {
-   double recoveryBase = (level == 0) ? Recovery_Start : (Recovery_Step * MathPow(Recovery_Distance_Multiplier, level));
-   return (recoveryBase + Trailing_Step) * _Point;
+   if (positionsTotalByType(POSITION_TYPE_SELL) == 0)
+      return;
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double requiredDistance = calcRecoveryDistance(recoveryLevel);
+   if ((currentAsk - lastSellPrice) >= requiredDistance)
+   {
+      if (rsiData[0] > rsiOverbought && currentAsk > upperBB[0])
+      {
+         openRecoveryTrade(ORDER_TYPE_BUY, currentAsk, recoveryLevel + 1);
+         recoveryLevel++;
+         lastBarTime = iTime(_Symbol, _Period, 0);
+      }
+   }
 }
 
-//+------------------------------------------------------------------+
-//| Open recovery trade in opposite direction                        |
-//+------------------------------------------------------------------+
-void OpenRecoveryTrade(ENUM_ORDER_TYPE type, double price, int level)
+double calcRecoveryDistance(int level)
 {
-   double lotSize = Initial_Lot * MathPow(2, level);
+   double recoveryBase = (level == 0) ? recoveryStart : (recoveryStep * MathPow(recoveryDistanceMultiplier, level));
+   return (recoveryBase + trailingStep) * _Point;
+}
 
-   // Place recovery (hedge) order at the current price.
+void openRecoveryTrade(ENUM_ORDER_TYPE type, double price, int level)
+{
+   double lotSize = initialLot * MathPow(2, level);
    if (type == ORDER_TYPE_SELL)
    {
       trade.Sell(lotSize, _Symbol, price, 0, 0, "Recovery Sell Lvl" + string(level));
-      ArrayResize(sellTickets, ArraySize(sellTickets) + 1);
-      sellTickets[ArraySize(sellTickets) - 1] = trade.ResultOrder();
-      lastSellTradePrice = price;
+      ArrayResize(sellOrderTickets, ArraySize(sellOrderTickets) + 1);
+      sellOrderTickets[ArraySize(sellOrderTickets) - 1] = trade.ResultOrder();
+      lastSellPrice = price;
    }
    else
    {
       trade.Buy(lotSize, _Symbol, price, 0, 0, "Recovery Buy Lvl" + string(level));
-      ArrayResize(buyTickets, ArraySize(buyTickets) + 1);
-      buyTickets[ArraySize(buyTickets) - 1] = trade.ResultOrder();
-      lastBuyTradePrice = price;
+      ArrayResize(buyOrderTickets, ArraySize(buyOrderTickets) + 1);
+      buyOrderTickets[ArraySize(buyOrderTickets) - 1] = trade.ResultOrder();
+      lastBuyPrice = price;
    }
 }
 
-//+------------------------------------------------------------------+
-//| Calculate breakeven price for position group                     |
-//+------------------------------------------------------------------+
-double CalculateBreakeven(ENUM_POSITION_TYPE type)
+double calcBreakeven(ENUM_POSITION_TYPE type)
 {
-   double totalVolume = 0;
-   double weightedPrice = 0;
-
+   double totalVolume = 0.0, weightedPrice = 0.0;
    for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
@@ -353,13 +285,10 @@ double CalculateBreakeven(ENUM_POSITION_TYPE type)
          weightedPrice += entry * volume;
       }
    }
-   return (totalVolume > 0) ? weightedPrice / totalVolume : 0.0;
+   return (totalVolume > 0.0) ? weightedPrice / totalVolume : 0.0;
 }
 
-//+------------------------------------------------------------------+
-//| Get positions count by type                                      |
-//+------------------------------------------------------------------+
-int PositionsTotalByType(ENUM_POSITION_TYPE type)
+int positionsTotalByType(ENUM_POSITION_TYPE type)
 {
    int count = 0;
    for (int i = PositionsTotal() - 1; i >= 0; i--)
@@ -371,49 +300,36 @@ int PositionsTotalByType(ENUM_POSITION_TYPE type)
    return count;
 }
 
-//+------------------------------------------------------------------+
-//| Open hedge trade in opposite direction                           |
-//+------------------------------------------------------------------+
-void OpenHedgeTrade(ENUM_ORDER_TYPE type, double price)
+void openHedgeTrade(ENUM_ORDER_TYPE type, double price)
 {
-   double lotSize = Initial_Lot * MathPow(2, RecoveryLevel);
-
+   double lotSize = initialLot * MathPow(2, recoveryLevel);
    if (type == ORDER_TYPE_SELL)
    {
-      trade.Sell(lotSize, _Symbol, price, 0, 0, "Hedge Sell Lvl" + string(RecoveryLevel + 1));
-      ArrayResize(sellTickets, ArraySize(sellTickets) + 1);
-      sellTickets[ArraySize(sellTickets) - 1] = trade.ResultOrder();
-      lastSellTradePrice = price;
+      trade.Sell(lotSize, _Symbol, price, 0, 0, "Hedge Sell Lvl" + string(recoveryLevel + 1));
+      ArrayResize(sellOrderTickets, ArraySize(sellOrderTickets) + 1);
+      sellOrderTickets[ArraySize(sellOrderTickets) - 1] = trade.ResultOrder();
+      lastSellPrice = price;
    }
    else
    {
-      trade.Buy(lotSize, _Symbol, price, 0, 0, "Hedge Buy Lvl" + string(RecoveryLevel + 1));
-      ArrayResize(buyTickets, ArraySize(buyTickets) + 1);
-      buyTickets[ArraySize(buyTickets) - 1] = trade.ResultOrder();
-      lastBuyTradePrice = price;
+      trade.Buy(lotSize, _Symbol, price, 0, 0, "Hedge Buy Lvl" + string(recoveryLevel + 1));
+      ArrayResize(buyOrderTickets, ArraySize(buyOrderTickets) + 1);
+      buyOrderTickets[ArraySize(buyOrderTickets) - 1] = trade.ResultOrder();
+      lastBuyPrice = price;
    }
 }
 
-//+------------------------------------------------------------------+
-//| Close all positions of specified type                            |
-//+------------------------------------------------------------------+
-void CloseAllPositions(ENUM_POSITION_TYPE type)
+void closeAllPositions(ENUM_POSITION_TYPE type)
 {
    for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
       if (PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_TYPE) == type)
-      {
          trade.PositionClose(ticket);
-      }
    }
-
-   // Reset tracking variables for the closed side
    if (type == POSITION_TYPE_BUY)
-      buyExtremePrice = 0.0;
+      maxBuyBid = 0.0;
    else if (type == POSITION_TYPE_SELL)
-      sellExtremePrice = 0.0;
-
-   // Also reset the unified RecoveryLevel
-   RecoveryLevel = 0;
+      minSellPrice = 0.0;
+   recoveryLevel = 0;
 }
