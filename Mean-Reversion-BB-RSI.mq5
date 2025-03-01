@@ -1,20 +1,23 @@
 #include <Trade/Trade.mqh>
 
 input double initialLot = 0.01;
-input int bbPeriod = 200;
+input int bbPeriod = 286;
 input double bbDeviation = 2.0;
-input int recoveryStart = 100;
-input int recoveryStep = 100;
-input double recoveryDistanceMultiplier = 1.5;
-input int rsiPeriod = 14;
-input int rsiOverbought = 92;
-input int rsiOversold = 18;
-input int trailingStart = 110;
-input int trailingStep = 100;
-input double maxEquityDrawdownMoney = 2000.0;
 input int atrPeriod = 14;
-input double atrMultiplierGain = 2.0;
-input double recoveryDistanceMultiplierLoss = 2.0;
+
+input int rsiPeriod = 14;
+input int rsiOverbought = 95;
+input int rsiOversold = 10;
+
+input int profitTrailingStart = 150;
+input int profitTrailingStep = 100;
+input double profitAtrDistanceMultiplier = 6;
+
+input int lossRecoveryTrailingStart = 150;
+input int lossRecoveryTrailingStep = 100;
+input double lossRecoveryDistanceMultiplier = 2.85;
+input double lossMaxEquityDrawdownMoney = 3500.0;
+input bool lossMaxEquityPauseEa = true;
 
 int bandHandle, rsiHandle, atrIndicatorHandle;
 double atrData[], upperBB[], middleBB[], lowerBB[], rsiData[];
@@ -44,11 +47,9 @@ int OnInit()
 
 void OnTick()
 {
-   if ((AccountInfoDouble(ACCOUNT_BALANCE) - AccountInfoDouble(ACCOUNT_EQUITY)) >= maxEquityDrawdownMoney)
+   if (lossMaxEquityPauseEa &&
+       (AccountInfoDouble(ACCOUNT_BALANCE) - AccountInfoDouble(ACCOUNT_EQUITY)) >= lossMaxEquityDrawdownMoney)
    {
-      closeAllPositions(POSITION_TYPE_BUY);
-      closeAllPositions(POSITION_TYPE_SELL);
-      ExpertRemove();
       return;
    }
 
@@ -68,7 +69,10 @@ void OnTick()
    bool newBar = isNewBar();
    if (newBar)
    {
-      if (PositionsTotal() == 0 && checkEntryConditions())
+      MqlDateTime dt;
+      TimeToStruct(TimeCurrent(), dt);
+
+      if (PositionsTotal() == 0 && checkEntryConditions() && dt.day_of_week != 5)
       {
          placeInitialOrders();
          lastBarTime = iTime(_Symbol, _Period, 0);
@@ -123,11 +127,11 @@ void manageVirtualStops()
       double breakeven = calcBreakeven(POSITION_TYPE_BUY);
       double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
       maxBuyBid = (maxBuyBid == 0.0) ? currentBid : fmax(currentBid, maxBuyBid);
-      double atrBreakeven = breakeven + (currentATR * atrMultiplierGain);
-      double atrTrailingStep = currentATR * recoveryDistanceMultiplier;
+      double atrBreakeven = breakeven + (currentATR * profitAtrDistanceMultiplier);
+      double atrprofitTrailingStep = currentATR * lossRecoveryDistanceMultiplier;
       if (currentBid >= atrBreakeven)
       {
-         double virtualSL = maxBuyBid - atrTrailingStep;
+         double virtualSL = maxBuyBid - atrprofitTrailingStep;
          if (currentBid <= virtualSL)
             closeAllPositions(POSITION_TYPE_BUY);
       }
@@ -137,11 +141,11 @@ void manageVirtualStops()
       double breakeven = calcBreakeven(POSITION_TYPE_SELL);
       double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
       minSellPrice = (minSellPrice == 0.0) ? currentAsk : fmin(currentAsk, minSellPrice);
-      double atrBreakeven = breakeven - (currentATR * atrMultiplierGain);
-      double atrTrailingStep = currentATR * recoveryDistanceMultiplierLoss;
+      double atrBreakeven = breakeven - (currentATR * profitAtrDistanceMultiplier);
+      double atrprofitTrailingStep = currentATR * lossRecoveryDistanceMultiplier;
       if (currentAsk <= atrBreakeven)
       {
-         double virtualSL = minSellPrice + atrTrailingStep;
+         double virtualSL = minSellPrice + atrprofitTrailingStep;
          if (currentAsk >= virtualSL)
             closeAllPositions(POSITION_TYPE_SELL);
       }
@@ -189,9 +193,17 @@ void placeInitialOrders()
 
 bool checkEntryConditions()
 {
+   // Avoid trading during high volatility
+   if (atrData[0] > atrData[1] * lossRecoveryDistanceMultiplier)
+      return false;
+
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    bool priceNearMiddle = MathAbs(price - middleBB[0]) <= 2 * _Point;
-   return priceNearMiddle;
+
+   // Add momentum check
+   bool momentum = MathAbs(middleBB[0] - middleBB[1]) < _Point * 2;
+
+   return priceNearMiddle && momentum;
 }
 
 void checkForRecoveries()
@@ -199,15 +211,15 @@ void checkForRecoveries()
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double currentATR = atrData[0];
-   double requiredDistance = currentATR * recoveryDistanceMultiplier * (recoveryLevel + 1);
+   double requiredDistance = currentATR * lossRecoveryDistanceMultiplier * (recoveryLevel + 1);
    if ((lastBuyPrice - currentBid) >= requiredDistance)
    {
-      openHedgeTrade(ORDER_TYPE_BUY, currentAsk);
+      openTrade(ORDER_TYPE_BUY, currentAsk);
       recoveryLevel++;
    }
    if ((currentBid - lastSellPrice) >= requiredDistance)
    {
-      openHedgeTrade(ORDER_TYPE_SELL, currentBid);
+      openTrade(ORDER_TYPE_SELL, currentBid);
       recoveryLevel++;
    }
 }
@@ -248,8 +260,8 @@ void checkSellRecoveries()
 
 double calcRecoveryDistance(int level)
 {
-   double recoveryBase = (level == 0) ? recoveryStart : (recoveryStep * MathPow(recoveryDistanceMultiplier, level));
-   return (recoveryBase + trailingStep) * _Point;
+   double recoveryBase = (level == 0) ? lossRecoveryTrailingStart : (lossRecoveryTrailingStep * MathPow(lossRecoveryDistanceMultiplier, level));
+   return (recoveryBase + profitTrailingStep) * _Point;
 }
 
 void openRecoveryTrade(ENUM_ORDER_TYPE type, double price, int level)
@@ -300,19 +312,19 @@ int positionsTotalByType(ENUM_POSITION_TYPE type)
    return count;
 }
 
-void openHedgeTrade(ENUM_ORDER_TYPE type, double price)
+void openTrade(ENUM_ORDER_TYPE type, double price)
 {
    double lotSize = initialLot * MathPow(2, recoveryLevel);
    if (type == ORDER_TYPE_SELL)
    {
-      trade.Sell(lotSize, _Symbol, price, 0, 0, "Hedge Sell Lvl" + string(recoveryLevel + 1));
+      trade.Sell(lotSize, _Symbol, price, 0, 0, "Sell Lvl" + string(recoveryLevel + 1));
       ArrayResize(sellOrderTickets, ArraySize(sellOrderTickets) + 1);
       sellOrderTickets[ArraySize(sellOrderTickets) - 1] = trade.ResultOrder();
       lastSellPrice = price;
    }
    else
    {
-      trade.Buy(lotSize, _Symbol, price, 0, 0, "Hedge Buy Lvl" + string(recoveryLevel + 1));
+      trade.Buy(lotSize, _Symbol, price, 0, 0, "Buy Lvl" + string(recoveryLevel + 1));
       ArrayResize(buyOrderTickets, ArraySize(buyOrderTickets) + 1);
       buyOrderTickets[ArraySize(buyOrderTickets) - 1] = trade.ResultOrder();
       lastBuyPrice = price;
