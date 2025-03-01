@@ -5,11 +5,6 @@ input int bbPeriod = 286;
 input double bbDeviation = 2.0;
 input int atrPeriod = 14;
 
-input int rsiPeriod = 14;
-input int rsiOverbought = 95;
-input int rsiOversold = 10;
-
-input int profitTrailingStart = 150;
 input int profitTrailingStep = 100;
 input double profitAtrDistanceMultiplier = 6;
 
@@ -19,14 +14,13 @@ input double lossRecoveryDistanceMultiplier = 2.85;
 input double lossMaxEquityDrawdownMoney = 3500.0;
 input bool lossMaxEquityPauseEa = true;
 
-int bandHandle, rsiHandle, atrIndicatorHandle;
-double atrData[], upperBB[], middleBB[], lowerBB[], rsiData[];
+int bandHandle, atrIndicatorHandle;
+double atrData[], upperBB[], middleBB[], lowerBB[];
 double buyEntry = 0.0, sellEntry = 0.0;
 double maxBuyBid = 0.0, minSellPrice = 0.0;
 
 double lastBuyPrice = 0.0, lastSellPrice = 0.0;
 int recoveryLevel = 0;
-ulong buyOrderTickets[], sellOrderTickets[];
 datetime lastBarTime = 0;
 CTrade trade;
 
@@ -34,13 +28,11 @@ int OnInit()
 {
    atrIndicatorHandle = iATR(_Symbol, _Period, atrPeriod);
    bandHandle = iBands(_Symbol, _Period, bbPeriod, 0, bbDeviation, PRICE_CLOSE);
-   rsiHandle = iRSI(_Symbol, _Period, rsiPeriod, PRICE_CLOSE);
 
    ArraySetAsSeries(atrData, true);
    ArraySetAsSeries(upperBB, true);
    ArraySetAsSeries(middleBB, true);
    ArraySetAsSeries(lowerBB, true);
-   ArraySetAsSeries(rsiData, true);
 
    return INIT_SUCCEEDED;
 }
@@ -62,8 +54,6 @@ void OnTick()
       recoveryLevel = 0;
       maxBuyBid = 0.0;
       minSellPrice = 0.0;
-      ArrayFree(buyOrderTickets);
-      ArrayFree(sellOrderTickets);
    }
 
    bool newBar = isNewBar();
@@ -163,12 +153,10 @@ void updateIndicators()
    ArrayResize(middleBB, 3);
    ArrayResize(upperBB, 3);
    ArrayResize(lowerBB, 3);
-   ArrayResize(rsiData, 3);
    ArrayResize(atrData, 3);
    CopyBuffer(bandHandle, 0, 0, 3, middleBB);
    CopyBuffer(bandHandle, 1, 0, 3, upperBB);
    CopyBuffer(bandHandle, 2, 0, 3, lowerBB);
-   CopyBuffer(rsiHandle, 0, 0, 3, rsiData);
    CopyBuffer(atrIndicatorHandle, 0, 0, 3, atrData);
 }
 
@@ -177,14 +165,10 @@ void placeInitialOrders()
    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    buyEntry = price;
    trade.Buy(initialLot, _Symbol, price, 0, 0, "Initial Buy");
-   ArrayResize(buyOrderTickets, ArraySize(buyOrderTickets) + 1);
-   buyOrderTickets[ArraySize(buyOrderTickets) - 1] = trade.ResultOrder();
 
    price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    sellEntry = price;
    trade.Sell(initialLot, _Symbol, price, 0, 0, "Initial Sell");
-   ArrayResize(sellOrderTickets, ArraySize(sellOrderTickets) + 1);
-   sellOrderTickets[ArraySize(sellOrderTickets) - 1] = trade.ResultOrder();
 
    lastBuyPrice = buyEntry;
    lastSellPrice = sellEntry;
@@ -199,10 +183,7 @@ bool checkEntryConditions()
 
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    bool priceNearMiddle = MathAbs(price - middleBB[0]) <= 2 * _Point;
-
-   // Add momentum check
    bool momentum = MathAbs(middleBB[0] - middleBB[1]) < _Point * 2;
-
    return priceNearMiddle && momentum;
 }
 
@@ -224,61 +205,23 @@ void checkForRecoveries()
    }
 }
 
-void checkBuyRecoveries()
-{
-   if (positionsTotalByType(POSITION_TYPE_BUY) == 0)
-      return;
-   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double requiredDistance = calcRecoveryDistance(recoveryLevel);
-   if ((lastBuyPrice - currentBid) >= requiredDistance)
-   {
-      if (rsiData[0] < rsiOversold && currentBid < lowerBB[0])
-      {
-         openRecoveryTrade(ORDER_TYPE_SELL, currentBid, recoveryLevel + 1);
-         recoveryLevel++;
-         lastBarTime = iTime(_Symbol, _Period, 0);
-      }
-   }
-}
-
-void checkSellRecoveries()
-{
-   if (positionsTotalByType(POSITION_TYPE_SELL) == 0)
-      return;
-   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double requiredDistance = calcRecoveryDistance(recoveryLevel);
-   if ((currentAsk - lastSellPrice) >= requiredDistance)
-   {
-      if (rsiData[0] > rsiOverbought && currentAsk > upperBB[0])
-      {
-         openRecoveryTrade(ORDER_TYPE_BUY, currentAsk, recoveryLevel + 1);
-         recoveryLevel++;
-         lastBarTime = iTime(_Symbol, _Period, 0);
-      }
-   }
-}
-
 double calcRecoveryDistance(int level)
 {
    double recoveryBase = (level == 0) ? lossRecoveryTrailingStart : (lossRecoveryTrailingStep * MathPow(lossRecoveryDistanceMultiplier, level));
    return (recoveryBase + profitTrailingStep) * _Point;
 }
 
-void openRecoveryTrade(ENUM_ORDER_TYPE type, double price, int level)
+void openTrade(ENUM_ORDER_TYPE type, double price)
 {
-   double lotSize = initialLot * MathPow(2, level);
+   double lotSize = initialLot * MathPow(2, recoveryLevel);
    if (type == ORDER_TYPE_SELL)
    {
-      trade.Sell(lotSize, _Symbol, price, 0, 0, "Recovery Sell Lvl" + string(level));
-      ArrayResize(sellOrderTickets, ArraySize(sellOrderTickets) + 1);
-      sellOrderTickets[ArraySize(sellOrderTickets) - 1] = trade.ResultOrder();
+      trade.Sell(lotSize, _Symbol, price, 0, 0, "Sell Lvl" + string(recoveryLevel + 1));
       lastSellPrice = price;
    }
    else
    {
-      trade.Buy(lotSize, _Symbol, price, 0, 0, "Recovery Buy Lvl" + string(level));
-      ArrayResize(buyOrderTickets, ArraySize(buyOrderTickets) + 1);
-      buyOrderTickets[ArraySize(buyOrderTickets) - 1] = trade.ResultOrder();
+      trade.Buy(lotSize, _Symbol, price, 0, 0, "Buy Lvl" + string(recoveryLevel + 1));
       lastBuyPrice = price;
    }
 }
@@ -310,25 +253,6 @@ int positionsTotalByType(ENUM_POSITION_TYPE type)
          count++;
    }
    return count;
-}
-
-void openTrade(ENUM_ORDER_TYPE type, double price)
-{
-   double lotSize = initialLot * MathPow(2, recoveryLevel);
-   if (type == ORDER_TYPE_SELL)
-   {
-      trade.Sell(lotSize, _Symbol, price, 0, 0, "Sell Lvl" + string(recoveryLevel + 1));
-      ArrayResize(sellOrderTickets, ArraySize(sellOrderTickets) + 1);
-      sellOrderTickets[ArraySize(sellOrderTickets) - 1] = trade.ResultOrder();
-      lastSellPrice = price;
-   }
-   else
-   {
-      trade.Buy(lotSize, _Symbol, price, 0, 0, "Buy Lvl" + string(recoveryLevel + 1));
-      ArrayResize(buyOrderTickets, ArraySize(buyOrderTickets) + 1);
-      buyOrderTickets[ArraySize(buyOrderTickets) - 1] = trade.ResultOrder();
-      lastBuyPrice = price;
-   }
 }
 
 void closeAllPositions(ENUM_POSITION_TYPE type)
