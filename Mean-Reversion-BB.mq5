@@ -1,17 +1,17 @@
 #include <Trade/Trade.mqh>
 
 input double initialLot = 0.01;
-input int bbPeriod = 44;
-input double bbDeviation = 4;
-input int atrPeriod = 56;
+input int bbPeriod = 122;
+input double bbDeviation = 3;
+input int atrPeriod = 96;
 
 input int profitTrailingStart = 100;
 input int profitTrailingStep = 100;
-input double profitAtrDistanceMultiplier = 2;
+input double profitAtrDistanceMultiplier = 4.5;
 
 input int lossRecoveryTrailingStart = 100;
 input int lossRecoveryTrailingStep = 100;
-input double lossRecoveryDistanceMultiplier = 7.5;
+input double lossRecoveryDistanceMultiplier = 4;
 input double lossMaxEquityDrawdownMoney = 3500.0;
 input bool lossMaxEquityPauseEa = true;
 
