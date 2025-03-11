@@ -1,15 +1,14 @@
 #include <Trade/Trade.mqh>
 
 input double initialLot = 0.01;
-input int bbPeriod = 142;
+input int bbPeriod = 20;
 input double bbDeviation = 2;
-input int atrPeriod = 86;
+input int atrPeriod = 15;
 
-input double profitMinMoney = 25;
+input double profitMinMoney = 31;
 
 input int lossRecoveryTrailingStart = 100;
-input double lossAtrDistanceMultiplier = 2.6;
-input double lossRecoveryDistanceMultiplier = 2.5;
+input double lossAtrDistanceMultiplier = 3;
 
 input int maxAllowedSpread = 7;
 
@@ -20,7 +19,6 @@ double buyEntry = 0.0, sellEntry = 0.0;
 double currentSpread;
 double lastBuyPrice = 0.0, lastSellPrice = 0.0;
 int buyRecoveryLevel = 0, sellRecoveryLevel = 0;
-datetime lastBarTime = 0;
 CTrade trade;
 
 int buyPositionsCount = 0;
@@ -46,10 +44,6 @@ int OnInit()
 
 void OnTick()
 {
-   bool newBar = isNewBar();
-   if (!newBar)
-      return;
-
    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
@@ -57,12 +51,10 @@ void OnTick()
 
    // Exit if spread is too high
    if (currentSpread > maxAllowedSpread)
-   {
       return;
-   }
 
-   updateIndicators();
    manageVirtualStops(currentBid, currentAsk);
+   updateIndicators();
 
    if (PositionsTotal() == 0)
    {
@@ -88,8 +80,6 @@ void OnTick()
          trade.Sell(initialLot, _Symbol, currentBid, 0, 0, "Initial Sell");
          lastSellPrice = sellEntry;
       }
-
-      lastBarTime = iTime(_Symbol, _Period, 0);
    }
 
    checkForRecoveries(currentBid, currentAsk);
@@ -114,12 +104,6 @@ void manageVirtualStops(double currentBid, double currentAsk)
          closeAllPositions(POSITION_TYPE_SELL);
       }
    }
-}
-
-bool isNewBar()
-{
-   datetime currentBar = iTime(_Symbol, _Period, 0);
-   return (currentBar != lastBarTime);
 }
 
 void updateIndicators()
