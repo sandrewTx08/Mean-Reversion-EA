@@ -5,22 +5,26 @@ input int bbPeriod = 142;
 input double bbDeviation = 2;
 input int atrPeriod = 86;
 
-input double profitMinMoney = 33;
-input double profitAtrDistanceMultiplier = 5;
+input double profitMinMoney = 25;
 
 input int lossRecoveryTrailingStart = 100;
-input double lossRecoveryDistanceMultiplier = 4;
-input double lossMaxEquityDrawdownMoney = 3000.0;
-input bool lossMaxEquityPauseEa = true;
+input double lossAtrDistanceMultiplier = 2.6;
+input double lossRecoveryDistanceMultiplier = 2.5;
+
+input int maxAllowedSpread = 7;
 
 int bandHandle, atrIndicatorHandle;
 double atrData[], upperBB[], middleBB[], lowerBB[];
 double buyEntry = 0.0, sellEntry = 0.0;
 
+double currentSpread;
 double lastBuyPrice = 0.0, lastSellPrice = 0.0;
 int buyRecoveryLevel = 0, sellRecoveryLevel = 0;
 datetime lastBarTime = 0;
 CTrade trade;
+
+int buyPositionsCount = 0;
+int sellPositionsCount = 0;
 
 int OnInit()
 {
@@ -32,71 +36,83 @@ int OnInit()
    ArraySetAsSeries(middleBB, true);
    ArraySetAsSeries(lowerBB, true);
 
+   ArrayResize(middleBB, 2);
+   ArrayResize(upperBB, 2);
+   ArrayResize(lowerBB, 2);
+   ArrayResize(atrData, 2);
+
    return INIT_SUCCEEDED;
 }
 
 void OnTick()
 {
-   if (lossMaxEquityPauseEa &&
-       (AccountInfoDouble(ACCOUNT_BALANCE) - AccountInfoDouble(ACCOUNT_EQUITY)) >= lossMaxEquityDrawdownMoney)
+   bool newBar = isNewBar();
+   if (!newBar)
+      return;
+
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   currentSpread = (currentAsk - currentBid) / _Point;
+
+   // Exit if spread is too high
+   if (currentSpread > maxAllowedSpread)
    {
       return;
    }
 
    updateIndicators();
-   manageVirtualStops();
+   manageVirtualStops(currentBid, currentAsk);
 
    if (PositionsTotal() == 0)
    {
-      buyRecoveryLevel = 0; // Reset both levels
+      buyRecoveryLevel = 0;
       sellRecoveryLevel = 0;
    }
 
-   bool newBar = isNewBar();
-   if (newBar)
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   if (checkEntryConditions(currentBid) && dt.day_of_week != 5)
    {
-      MqlDateTime dt;
-      TimeToStruct(TimeCurrent(), dt);
-
-      if (checkEntryConditions() && dt.day_of_week != 5)
+      if (buyPositionsCount == 0)
       {
-         if (positionsTotalByType(POSITION_TYPE_BUY) == 0)
-         {
-            double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-            buyEntry = price;
-            trade.Buy(initialLot, _Symbol, price, 0, 0, "Initial Buy");
-            lastBuyPrice = buyEntry;
-         }
+         buyEntry = currentAsk;
+         trade.Buy(initialLot, _Symbol, currentAsk, 0, 0, "Initial Buy");
+         lastBuyPrice = buyEntry;
+      }
 
-         if (positionsTotalByType(POSITION_TYPE_SELL) == 0)
-         {
-            double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-            sellEntry = price;
-            trade.Sell(initialLot, _Symbol, price, 0, 0, "Initial Sell");
-            lastSellPrice = sellEntry;
-         }
+      if (sellPositionsCount == 0)
+      {
+         sellEntry = currentBid;
+         trade.Sell(initialLot, _Symbol, currentBid, 0, 0, "Initial Sell");
+         lastSellPrice = sellEntry;
+      }
 
-         lastBarTime = iTime(_Symbol, _Period, 0);
+      lastBarTime = iTime(_Symbol, _Period, 0);
+   }
+
+   checkForRecoveries(currentBid, currentAsk);
+}
+
+void manageVirtualStops(double currentBid, double currentAsk)
+{
+   if (buyPositionsCount > 0)
+   {
+      double buyProfit = calculateTotalProfit(POSITION_TYPE_BUY, buyPositionsCount);
+      if (buyProfit >= profitMinMoney)
+      {
+         closeAllPositions(POSITION_TYPE_BUY);
       }
    }
 
-   checkForRecoveries();
-}
-
-void manageVirtualStops()
-{
-   // Check and close BUY positions if profit target met
-   double buyProfit = calculateTotalProfit(POSITION_TYPE_BUY);
-   if (buyProfit >= profitMinMoney)
+   if (sellPositionsCount > 0)
    {
-      closeAllPositions(POSITION_TYPE_BUY);
-   }
-
-   // Check and close SELL positions if profit target met
-   double sellProfit = calculateTotalProfit(POSITION_TYPE_SELL);
-   if (sellProfit >= profitMinMoney)
-   {
-      closeAllPositions(POSITION_TYPE_SELL);
+      double sellProfit = calculateTotalProfit(POSITION_TYPE_SELL, sellPositionsCount);
+      if (sellProfit >= profitMinMoney)
+      {
+         closeAllPositions(POSITION_TYPE_SELL);
+      }
    }
 }
 
@@ -108,96 +124,81 @@ bool isNewBar()
 
 void updateIndicators()
 {
-   ArrayResize(middleBB, 3);
-   ArrayResize(upperBB, 3);
-   ArrayResize(lowerBB, 3);
-   ArrayResize(atrData, 3);
-   CopyBuffer(bandHandle, 0, 0, 3, middleBB);
-   CopyBuffer(bandHandle, 1, 0, 3, upperBB);
-   CopyBuffer(bandHandle, 2, 0, 3, lowerBB);
-   CopyBuffer(atrIndicatorHandle, 0, 0, 3, atrData);
+   CopyBuffer(bandHandle, 0, 0, 2, middleBB);
+   CopyBuffer(bandHandle, 1, 0, 2, upperBB);
+   CopyBuffer(bandHandle, 2, 0, 2, lowerBB);
+   CopyBuffer(atrIndicatorHandle, 0, 0, 2, atrData);
 }
 
-bool checkEntryConditions()
+bool checkEntryConditions(double price)
 {
-   if (atrData[0] > atrData[1] * lossRecoveryDistanceMultiplier)
-      return false;
-
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    bool priceNearMiddle = MathAbs(price - middleBB[0]) <= 2 * _Point;
    bool momentum = MathAbs(middleBB[0] - middleBB[1]) < _Point * 2;
    return priceNearMiddle && momentum;
 }
 
-void checkForRecoveries()
+void checkForRecoveries(double currentBid, double currentAsk)
 {
-   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double currentAtr = atrData[0];
 
-   // Check for BUY recovery (price hits lower band)
    if (currentBid <= lowerBB[0] && lastBuyPrice > 0)
    {
-      double requiredDistance = (lossRecoveryTrailingStart * _Point) * (buyRecoveryLevel + 1);
+      double requiredDistance = currentAtr * lossAtrDistanceMultiplier * (buyRecoveryLevel + 1);
       if ((lastBuyPrice - currentBid) >= requiredDistance)
       {
-         openTrade(ORDER_TYPE_BUY, currentAsk);
+         openTrade(ORDER_TYPE_BUY, currentAsk, currentAtr);
          buyRecoveryLevel++;
       }
    }
 
-   // Check for SELL recovery (price hits upper band)
    if (currentBid >= upperBB[0] && lastSellPrice > 0)
    {
-      double requiredDistance = (lossRecoveryTrailingStart * _Point) * (sellRecoveryLevel + 1);
+      double requiredDistance = currentAtr * lossAtrDistanceMultiplier * (sellRecoveryLevel + 1);
       if ((currentBid - lastSellPrice) >= requiredDistance)
       {
-         openTrade(ORDER_TYPE_SELL, currentBid);
+         openTrade(ORDER_TYPE_SELL, currentBid, currentAtr);
          sellRecoveryLevel++;
       }
    }
 }
 
-void openTrade(ENUM_ORDER_TYPE type, double price)
+void openTrade(ENUM_ORDER_TYPE type, double price, double atrValue)
 {
    double lotSize;
    if (type == ORDER_TYPE_BUY)
    {
-      lotSize = initialLot * MathPow(2, buyRecoveryLevel);
-      trade.Buy(lotSize, _Symbol, price, 0, 0, "Recovery Buy Lvl" + string(buyRecoveryLevel + 1));
+      lotSize = initialLot * (1 << buyRecoveryLevel);
+      trade.Buy(lotSize, _Symbol, price, 0, 0, "Recovery Buy Lvl" + IntegerToString(buyRecoveryLevel + 1));
       lastBuyPrice = price;
    }
    else
    {
-      lotSize = initialLot * MathPow(2, sellRecoveryLevel);
-      trade.Sell(lotSize, _Symbol, price, 0, 0, "Recovery Sell Lvl" + string(sellRecoveryLevel + 1));
+      lotSize = initialLot * (1 << sellRecoveryLevel);
+      trade.Sell(lotSize, _Symbol, price, 0, 0, "Recovery Sell Lvl" + IntegerToString(sellRecoveryLevel + 1));
       lastSellPrice = price;
    }
 }
 
-double calculateTotalProfit(ENUM_POSITION_TYPE type)
+double calculateTotalProfit(ENUM_POSITION_TYPE type, int expectedCount)
 {
+   if (expectedCount <= 0)
+      return 0.0;
    double totalProfit = 0.0;
+   int count = 0;
    for (int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
       if (PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_TYPE) == type)
       {
          totalProfit += PositionGetDouble(POSITION_PROFIT);
+         totalProfit += PositionGetDouble(POSITION_SWAP);
+         totalProfit += PositionGetDouble(POSITION_COMMISSION);
+         count++;
+         if (count == expectedCount)
+            break;
       }
    }
    return totalProfit;
-}
-
-int positionsTotalByType(ENUM_POSITION_TYPE type)
-{
-   int count = 0;
-   for (int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if (PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_TYPE) == type)
-         count++;
-   }
-   return count;
 }
 
 void closeAllPositions(ENUM_POSITION_TYPE type)
@@ -210,11 +211,25 @@ void closeAllPositions(ENUM_POSITION_TYPE type)
    }
 
    if (type == POSITION_TYPE_BUY)
-   {
       buyRecoveryLevel = 0;
-   }
    else if (type == POSITION_TYPE_SELL)
-   {
       sellRecoveryLevel = 0;
+}
+
+void OnTrade()
+{
+   buyPositionsCount = 0;
+   sellPositionsCount = 0;
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (PositionSelectByTicket(ticket))
+      {
+         ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+         if (type == POSITION_TYPE_BUY)
+            buyPositionsCount++;
+         else if (type == POSITION_TYPE_SELL)
+            sellPositionsCount++;
+      }
    }
 }
